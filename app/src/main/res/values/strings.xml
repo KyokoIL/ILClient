@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">ILClient</string>
+    <string name="vpn_session_name">ILClient</string>
+    <string name="vpn_notification_title">ILClient Tunnel</string>
+</resources>
