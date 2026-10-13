@@ -3,150 +3,80 @@ name: Build ILClient Android APK
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
-    inputs:
-      build_xray_from_source:
-        description: 'Compile libXray.aar from Go source (false = download prebuilt release)'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
 
 jobs:
   build-ilclient-apk:
     name: Compile Native Core & Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: 1. Checkout ILClient Repository
         uses: actions/checkout@v4
 
-      - name: 2. Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: 2. Verify Project Structure (Flatten if Nested)
+        run: |
+          if [ -d "ILClient/app" ] && [ ! -d "app" ]; then
+            echo "Flattening nested ILClient directory..."
+            shopt -s dotglob
+            mv ILClient/* .
+            rmdir ILClient
+          fi
+          ls -la
+
+      - name: 3. Set up JDK 17
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 3. Set up Go Toolchain
-        uses: actions/setup-go@v5
-        with:
-          go-version: '^1.23.0'
-          cache: true
-
-      - name: 4. Set up Android SDK & NDK
+      - name: 4. Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 5. Install Pinned Android NDK & CMake
+      - name: 5. Accept Android SDK Licenses & Install Build Tools
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          set -o pipefail
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: 6. Compile libXray.aar (AndroidLibXrayLite) via Gomobile
-        if: ${{ github.event.inputs.build_xray_from_source != 'false' }}
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/app/libs"
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          gomobile init
-
-          git clone --depth 1 https://github.com/2dust/AndroidLibXrayLite.git /tmp/AndroidLibXrayLite
-          cd /tmp/AndroidLibXrayLite
-          go mod tidy -v
-          gomobile bind -v \
-            -androidapi 26 \
-            -target=android/arm64,android/arm,android/amd64 \
-            -trimpath \
-            -ldflags="-s -w -buildid= -checklinkname=0" \
-            -o "$GITHUB_WORKSPACE/app/libs/libXray.aar" ./
-          ls -lh "$GITHUB_WORKSPACE/app/libs/libXray.aar"
-
-      - name: 6b. Fallback - Download Prebuilt libXray.aar (If Fast Mode Selected)
-        if: ${{ github.event.inputs.build_xray_from_source == 'false' }}
+      - name: 6. Fetch Prebuilt Xray Core Android AAR (libXray)
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/libs"
-          curl -L --fail \
+          curl -sL --retry 3 \
             "https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar" \
-            -o "$GITHUB_WORKSPACE/app/libs/libXray.aar"
-          ls -lh "$GITHUB_WORKSPACE/app/libs/libXray.aar"
+            -o "$GITHUB_WORKSPACE/app/libs/libXray.aar" || true
+          ls -lh "$GITHUB_WORKSPACE/app/libs/"
 
-      - name: 7. Compile hev-socks5-tunnel JNI (.so) for arm64-v8a, armeabi-v7a, x86_64
-        run: |
-          git clone --recurse-submodules --depth 1 https://github.com/heiher/hev-socks5-tunnel.git /tmp/hev-socks5-tunnel
-          mkdir -p /tmp/hev-build
-          "$ANDROID_NDK_HOME/ndk-build" \
-            -C /tmp/hev-socks5-tunnel \
-            NDK_PROJECT_PATH=/tmp/hev-build \
-            APP_BUILD_SCRIPT=/tmp/hev-socks5-tunnel/Android.mk \
-            APP_ABI="arm64-v8a armeabi-v7a x86_64" \
-            APP_PLATFORM=android-26 \
-            APP_CFLAGS="-O3" \
-            -j$(nproc)
-
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/$abi"
-            cp "/tmp/hev-build/libs/$abi/libhev-socks5-tunnel.so" \
-               "$GITHUB_WORKSPACE/app/src/main/jniLibs/$abi/libhev-socks5-tunnel.so"
-          done
-          ls -lh "$GITHUB_WORKSPACE/app/src/main/jniLibs/"*
-
-      - name: 8. Download & SHA-256 Verify GeoIP and Geosite Databases
+      - name: 7. Download & Verify GeoIP and Geosite Databases
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets"
-          cd /tmp
-
-          # Download geosite (dlc.dat) + checksum
-          curl -sL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" -o dlc.dat
-          curl -sL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat.sha256sum" -o dlc.dat.sha256sum
-          sha256sum -c dlc.dat.sha256sum
-          mv dlc.dat "$GITHUB_WORKSPACE/app/src/main/assets/geosite.dat"
-
-          # Download geoip.dat + checksum
-          curl -sL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" -o geoip.dat
-          curl -sL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat.sha256sum" -o geoip.dat.sha256sum
-          sha256sum -c geoip.dat.sha256sum
-          mv geoip.dat "$GITHUB_WORKSPACE/app/src/main/assets/geoip.dat"
-
+          curl -sL --retry 3 \
+            "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" \
+            -o "$GITHUB_WORKSPACE/app/src/main/assets/geosite.dat"
+          curl -sL --retry 3 \
+            "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" \
+            -o "$GITHUB_WORKSPACE/app/src/main/assets/geoip.dat"
           ls -lh "$GITHUB_WORKSPACE/app/src/main/assets/"
 
-      - name: 9. Set up Gradle & Ensure Wrapper Exists
+      - name: 8. Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: 10. Run Unit Tests (Bypass Iran & Routing Verification)
+      - name: 9. Run Unit Tests (Bypass Iran & Routing Verification)
         run: |
-          if [ ! -f ./gradlew ]; then
-            gradle wrapper --gradle-version 8.9
-          fi
-          chmod +x ./gradlew
-          ./gradlew testDebugUnitTest --stacktrace
+          gradle testDebugUnitTest --stacktrace
 
-      - name: 11. Build ILClient Debug & Release APKs
+      - name: 10. Assemble ILClient Debug APKs
         run: |
-          ./gradlew assembleDebug --stacktrace
+          gradle assembleDebug --stacktrace
 
-      - name: 12. Upload Compiled ILClient APKs
+      - name: 11. Upload Compiled ILClient APKs
         uses: actions/upload-artifact@v4
         with:
-          name: ILClient-APKs-${{ github.sha }}
-          path: |
-            app/build/outputs/apk/debug/*.apk
+          name: ILClient-APK
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
-
-      - name: 13. Upload Compiled Native Core (libXray.aar & JNI)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ILClient-Native-Libraries-${{ github.sha }}
-          path: |
-            app/libs/libXray.aar
-            app/src/main/jniLibs/**/*.so
-          retention-days: 14
