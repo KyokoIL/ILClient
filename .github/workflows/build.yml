@@ -15,13 +15,11 @@ jobs:
       - name: 1. Checkout ILClient Repository
         uses: actions/checkout@v4
 
-      - name: 2. Verify Project Structure (Flatten if Nested)
+      - name: 2. Patch Gradle ABI Filter Conflict & Clean Stray Files
         run: |
-          if [ -d "ILClient/app" ] && [ ! -d "app" ]; then
-            echo "Flattening nested ILClient directory..."
-            shopt -s dotglob
-            mv ILClient/* .
-            rmdir ILClient
+          rm -f kossher
+          if [ -f "app/build.gradle.kts" ]; then
+            sed -i '/ndk {/,/}/d' app/build.gradle.kts
           fi
           ls -la
 
@@ -31,49 +29,54 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 4. Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 5. Accept Android SDK Licenses & Install Build Tools
+      - name: 4. Configure Pre-installed Android SDK & Accept Licenses
         run: |
-          set +o pipefail
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          set -o pipefail
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          export ANDROID_HOME="/usr/local/lib/android/sdk"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
 
-      - name: 6. Fetch Prebuilt Xray Core Android AAR (libXray)
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | sort -V | tail -n 1)
+          echo "Using sdkmanager at: $SDKMANAGER"
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses > /dev/null 2>&1 || true
+          set -o pipefail
+
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: 5. Fetch Prebuilt Xray Core Android AAR (libXray)
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/libs"
-          curl -sL --retry 3 \
+          curl -fL --retry 3 \
             "https://github.com/2dust/AndroidLibXrayLite/releases/latest/download/libv2ray.aar" \
-            -o "$GITHUB_WORKSPACE/app/libs/libXray.aar" || true
+            -o "$GITHUB_WORKSPACE/app/libs/libXray.aar" || rm -f "$GITHUB_WORKSPACE/app/libs/libXray.aar"
           ls -lh "$GITHUB_WORKSPACE/app/libs/"
 
-      - name: 7. Download & Verify GeoIP and Geosite Databases
+      - name: 6. Download GeoIP and Geosite Databases
         run: |
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets"
-          curl -sL --retry 3 \
+          curl -fL --retry 3 \
             "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" \
             -o "$GITHUB_WORKSPACE/app/src/main/assets/geosite.dat"
-          curl -sL --retry 3 \
+          curl -fL --retry 3 \
             "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" \
             -o "$GITHUB_WORKSPACE/app/src/main/assets/geoip.dat"
           ls -lh "$GITHUB_WORKSPACE/app/src/main/assets/"
 
-      - name: 8. Set up Gradle 8.9
+      - name: 7. Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: 9. Run Unit Tests (Bypass Iran & Routing Verification)
+      - name: 8. Run Unit Tests (Bypass Iran & Routing Verification)
         run: |
           gradle testDebugUnitTest --stacktrace
 
-      - name: 10. Assemble ILClient Debug APKs
+      - name: 9. Assemble ILClient Debug APKs
         run: |
           gradle assembleDebug --stacktrace
 
-      - name: 11. Upload Compiled ILClient APKs
+      - name: 10. Upload Compiled ILClient APKs
         uses: actions/upload-artifact@v4
         with:
           name: ILClient-APK
